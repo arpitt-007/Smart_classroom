@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Classroom Attendance</title>
+  <style>
+    :root {
+      --bg: #f3f5f8; --card: #fff; --text: #1f2937; --muted: #64748b;
+      --border: #e5e7eb; --blue: #2563eb; --green: #16a34a;
+      --red: #dc2626; --orange: #ea580c; --shadow: 0 3px 14px rgba(15,23,42,.07);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: var(--bg); color: var(--text); }
+    header { background: #111827; color: white; padding: 20px 28px; display:flex; justify-content:space-between; align-items:center; gap:18px; flex-wrap:wrap; }
+    header h1 { font-size: 23px; margin: 0; }
+    header p { margin: 6px 0 0; color:#cbd5e1; font-size:13px; }
+    .header-actions { display:flex; gap:10px; flex-wrap:wrap; }
+    button { border:0; border-radius:7px; padding:10px 14px; font-weight:700; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    button:hover:not(:disabled) { filter:brightness(.96); }
+    .btn-start { background:#22c55e; color:white; }
+    .btn-end { background:#ef4444; color:white; }
+    .btn-blue { background:var(--blue); color:white; }
+    .btn-orange { background:#f97316; color:white; }
+    .btn-light { background:#e5e7eb; color:#111827; }
+    .btn-danger { background:#fee2e2; color:#991b1b; }
+    main { max-width:1500px; padding:22px; margin:auto; }
+    .card { background:var(--card); border-radius:12px; padding:20px; box-shadow:var(--shadow); margin-bottom:22px; }
+    .session-strip { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+    .session-left { display:flex; align-items:center; gap:12px; }
+    .dot { width:12px; height:12px; border-radius:50%; background:#9ca3af; flex-shrink:0; }
+    .dot.active { background:#22c55e; }
+    .muted { color:var(--muted); font-size:13px; }
+    .timer { font-size:20px; font-weight:800; font-variant-numeric:tabular-nums; }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:18px; margin-bottom:22px; }
+    .metric { background:white; border-radius:12px; padding:20px; box-shadow:var(--shadow); min-width:0; }
+    .metric-label { color:var(--muted); font-size:13px; margin-bottom:10px; }
+    .metric-value { font-size:30px; font-weight:800; overflow-wrap:anywhere; }
+    .green { color:var(--green); } .red { color:var(--red); }
+    .section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+    h2 { font-size:19px; margin:0; }
+    h3 { font-size:16px; margin:0 0 12px; }
+    .table-wrap { width:100%; overflow-x:auto; }
+    table { border-collapse:collapse; width:100%; min-width:650px; }
+    th,td { padding:12px; text-align:left; border-bottom:1px solid var(--border); font-size:14px; }
+    th { background:#f8fafc; color:var(--muted); font-size:11px; letter-spacing:.04em; text-transform:uppercase; }
+    tbody tr:last-child td { border-bottom:0; }
+    code,.mono { font-family:Consolas,Monaco,monospace; }
+    .badge { display:inline-block; padding:5px 9px; border-radius:20px; font-size:11px; font-weight:800; white-space:nowrap; }
+    .badge-present { background:#dcfce7; color:#166534; }
+    .badge-low { background:#fef3c7; color:#92400e; }
+    .badge-unknown { background:#fee2e2; color:#991b1b; }
+    .badge-active { background:#dbeafe; color:#1d4ed8; }
+    .form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)) auto; align-items:end; gap:12px; }
+    .timetable-form { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+    .field { display:flex; flex-direction:column; gap:6px; min-width:0; }
+    label { color:var(--muted); font-size:12px; font-weight:700; }
+    input,select { width:100%; min-width:0; padding:11px 12px; border:1px solid #cbd5e1; border-radius:7px; background:white; color:var(--text); font-size:14px; }
+    input:focus,select:focus { outline:2px solid #bfdbfe; border-color:var(--blue); }
+    .form-actions { display:flex; justify-content:flex-end; align-items:end; }
+    .unknown-list { display:grid; gap:10px; }
+    .unknown-item { display:flex; align-items:center; justify-content:space-between; gap:14px; border:1px solid #fed7aa; background:#fff7ed; padding:13px 15px; border-radius:8px; flex-wrap:wrap; }
+    .unknown-item .details { display:grid; gap:5px; }
+    .empty { text-align:center; padding:22px; color:var(--muted); font-size:14px; }
+    .notice { background:#eff6ff; border:1px solid #bfdbfe; color:#1e40af; padding:12px 14px; border-radius:8px; font-size:13px; margin-top:12px; }
+    .current-class { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; background:#f8fafc; border:1px solid var(--border); padding:14px; border-radius:8px; margin-bottom:16px; }
+    .current-class strong { display:block; margin-bottom:5px; }
+    .toast { position:fixed; right:22px; bottom:22px; z-index:10; max-width:calc(100vw - 44px); background:#111827; color:white; border-radius:9px; padding:13px 17px; box-shadow:var(--shadow); display:none; }
+    .toast.success { background:#15803d; } .toast.error { background:#b91c1c; }
+    @media(max-width:1000px) { .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } .form-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .timetable-form { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    @media(max-width:600px) { header { padding:18px; } main { padding:14px; } .metrics { grid-template-columns:1fr 1fr; gap:10px; } .metric { padding:14px; } .metric-value { font-size:24px; } .card { padding:15px; } .form-grid,.timetable-form { grid-template-columns:1fr; } .session-strip { align-items:flex-start; } .timer { font-size:17px; } }
+  </style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Smart Classroom Attendance</h1>
+    <p>ESP32-based Wi-Fi device detection and timetable-linked attendance</p>
+  </div>
+  <div class="header-actions">
+    <button id="startClassBtn" class="btn-start" onclick="startClass()">Start Class</button>
+    <button id="endClassBtn" class="btn-end" onclick="endClass()" disabled>End Class</button>
+  </div>
+</header>
+
+<main>
+  <section class="card session-strip">
+    <div class="session-left">
+      <span id="statusDot" class="dot"></span>
+      <div>
+        <strong id="sessionStatus">Checking session…</strong>
+        <div id="sessionMessage" class="muted">Loading current session status.</div>
+      </div>
+    </div>
+    <div id="sessionTimer" class="timer">00:00:00</div>
+  </section>
+
+  <section class="metrics">
+    <div class="metric"><div class="metric-label">BACKEND STATUS</div><div id="nodeStatus" class="metric-value green">CHECKING</div></div>
+    <div class="metric"><div class="metric-label">REGISTERED STUDENTS</div><div id="connectedDevices" class="metric-value">0</div></div>
+    <div class="metric"><div class="metric-label">PRESENT STUDENTS</div><div id="presentStudents" class="metric-value">0</div></div>
+    <div class="metric"><div class="metric-label">SESSION TIME</div><div id="sessionTimeCard" class="metric-value">00:00</div></div>
+  </section>
+
+  <section class="card">
+    <div class="section-head"><h2>Current Scheduled Class</h2><button class="btn-light" onclick="loadCurrentTimetable()">Refresh</button></div>
+    <div id="currentClass" class="current-class">
+      <div><strong>Checking timetable…</strong><span class="muted">Looking for a class scheduled at the current time.</span></div>
+    </div>
+    <div class="muted">Starting a class automatically links it to the timetable entry matching the current weekday and time. You can also select a specific timetable entry below.</div>
+  </section>
+
+  <section class="card">
+    <div class="section-head"><h2>Student Attendance</h2><button class="btn-light" onclick="refreshAll()">Refresh</button></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Student ID</th><th>Name</th><th>Device MAC</th><th>Presence</th><th>Status</th></tr></thead>
+        <tbody id="attendanceTable"><tr><td colspan="5" class="empty">Loading attendance…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="section-head"><h2>Register Student</h2></div>
+    <form id="registrationForm" class="form-grid">
+      <div class="field"><label for="studentId">Student ID</label><input id="studentId" placeholder="25BCE2800" required></div>
+      <div class="field"><label for="studentName">Student Name</label><input id="studentName" placeholder="Student name" required></div>
+      <div class="field"><label for="deviceMac">Device MAC</label><input id="deviceMac" placeholder="AA:BB:CC:DD:EE:FF" required></div>
+      <div class="form-actions"><button type="submit" class="btn-blue">Register Student</button></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="section-head"><h2>Unknown Devices</h2><button class="btn-light" onclick="loadUnknownDevices()">Refresh</button></div>
+    <div id="unknownDevices" class="unknown-list"><div class="empty">Loading unknown devices…</div></div>
+  </section>
+
+  <section class="card">
+    <div class="section-head"><h2>Timetable Management</h2><button class="btn-light" onclick="loadTimetable()">Refresh timetable</button></div>
+    <form id="timetableForm" class="timetable-form">
+      <div class="field"><label for="className">Class / Course</label><input id="className" placeholder="CSE Classroom" required></div>
+      <div class="field"><label for="subject">Subject</label><input id="subject" placeholder="Data Structures" required></div>
+      <div class="field"><label for="instructor">Instructor (optional)</label><input id="instructor" placeholder="Faculty name"></div>
+      <div class="field"><label for="room">Room (optional)</label><input id="room" placeholder="AB-201"></div>
+      <div class="field"><label for="timetableDay">Day</label>
+        <select id="timetableDay" required>
+          <option value="Monday">Monday</option><option value="Tuesday">Tuesday</option>
+          <option value="Wednesday">Wednesday</option><option value="Thursday">Thursday</option>
+          <option value="Friday">Friday</option><option value="Saturday">Saturday</option><option value="Sunday">Sunday</option>
+        </select>
+      </div>
+      <div class="field"><label for="startTime">Start time</label><input id="startTime" type="time" required></div>
+      <div class="field"><label for="endTime">End time</label><input id="endTime" type="time" required></div>
+      <div class="form-actions"><button class="btn-blue" type="submit">Add to Timetable</button></div>
+    </form>
+    <div class="notice">Use your actual class schedule. Times are interpreted using the computer running FastAPI's local time. The backend allows sessions outside the timetable, but those sessions will have no scheduled-class match unless you choose a timetable entry.</div>
+    <div style="height:18px"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Day</th><th>Time</th><th>Class / Course</th><th>Subject</th><th>Instructor</th><th>Room</th><th>Action</th></tr></thead>
+        <tbody id="timetableTable"><tr><td colspan="7" class="empty">No timetable entries loaded.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="section-head"><h2>Live Detection History</h2><button class="btn-light" onclick="loadLiveDetection()">Refresh</button></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Student ID</th><th>Name</th><th>MAC</th><th>Node</th><th>Status</th><th>Last Detection</th></tr></thead>
+        <tbody id="liveDetectionTable"><tr><td colspan="6" class="empty">Loading detection history…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+  const API_BASE = "http://172.20.10.4:8000";
+  let sessionActive = false;
+  let sessionStartTime = null;
+  let sessionTimerInterval = null;
+  let toastTimeout = null;
+  let timetableCache = [];
+
+  async function apiRequest(endpoint, options = {}) {
+    const response = await fetch(API_BASE + endpoint, options);
+    let payload;
+    try { payload = await response.json(); } catch { payload = null; }
+    if (!response.ok) {
+      const detail = payload && (payload.detail || payload.message);
+      throw new Error(detail || `HTTP ${response.status}`);
+    }
+    return payload;
+  }
+
+  function showToast(message, type = "success") {
+    const el = document.getElementById("toast");
+    el.textContent = message;
+    el.className = `toast ${type}`;
+    el.style.display = "block";
+    clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => { el.style.display = "none"; }, 3500);
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, ch => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+    })[ch]);
+  }
+
+  function fmtDate(value) {
+    if (!value) return "—";
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? escapeHtml(value) : d.toLocaleString();
+  }
+
+  function fmtElapsed(ms) {
+    const seconds = Math.max(0, Math.floor(ms / 1000));
+    const h = String(Math.floor(seconds / 3600)).padStart(2, "0");
+    const m = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+    const s = String(seconds % 60).padStart(2, "0");
+    return { full: `${h}:${m}:${s}`, short: `${h === "00" ? "" : h + ":"}${m}:${s}` };
+  }
+
+  function updateTimer() {
+    if (!sessionActive || !sessionStartTime) {
+      document.getElementById("sessionTimer").textContent = "00:00:00";
+      document.getElementById("sessionTimeCard").textContent = "00:00";
+      return;
+    }
+    const elapsed = fmtElapsed(Date.now() - sessionStartTime.getTime());
+    document.getElementById("sessionTimer").textContent = elapsed.full;
+    document.getElementById("sessionTimeCard").textContent = elapsed.short;
+  }
+
+  function startTimer() {
+    if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+    updateTimer();
+    sessionTimerInterval = setInterval(updateTimer, 1000);
+  }
+
+  function updateSessionUI() {
+    document.getElementById("sessionStatus").textContent =
+      sessionActive ? "Class Session Active" : "No Active Session";
+    document.getElementById("sessionMessage").textContent =
+      sessionActive ? "Attendance monitoring is running." : "Start a class session to begin attendance.";
+    document.getElementById("statusDot").classList.toggle("active", sessionActive);
+    document.getElementById("startClassBtn").disabled = sessionActive;
+    document.getElementById("endClassBtn").disabled = !sessionActive;
+  }
+
+  async function loadSessionStatus() {
+    const data = await apiRequest("/api/session/current");
+    sessionActive = Boolean(data.active);
+    if (sessionActive && data.start_time) {
+      sessionStartTime = new Date(data.start_time);
+      startTimer();
+    } else {
+      sessionStartTime = null;
+      if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+      sessionTimerInterval = null;
+      updateTimer();
+    }
+    updateSessionUI();
+    return data;
+  }
+
+  async function startClass() {
+    try {
+      // If the current timetable has a matching class, backend auto-links it.
+      const data = await apiRequest("/api/session/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      sessionActive = true;
+      sessionStartTime = data.start_time ? new Date(data.start_time) : new Date();
+      updateSessionUI();
+      startTimer();
+      const cls = data.scheduled_class;
+      showToast(cls ? `Started: ${cls.subject} (${cls.class_name})` : "Class started without a timetable match", cls ? "success" : "error");
+      await refreshAll();
+    } catch (err) {
+      console.error(err);
+      showToast(`Could not start class: ${err.message}`, "error");
+    }
+  }
+
+  async function startSelectedClass(id) {
+    try {
+      const data = await apiRequest("/api/session/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timetable_id: Number(id) })
+      });
+      sessionActive = true;
+      sessionStartTime = data.start_time ? new Date(data.start_time) : new Date();
+      updateSessionUI();
+      startTimer();
+      showToast(`Started scheduled class: ${data.scheduled_class?.subject || "Class"}`);
+      await refreshAll();
+    } catch (err) {
+      showToast(`Could not start class: ${err.message}`, "error");
+    }
+  }
+
+  async function endClass() {
+    try {
+      const data = await apiRequest("/api/session/end", { method: "POST" });
+      sessionActive = false;
+      sessionStartTime = null;
+      if (sessionTimerInterval) clearInterval(sessionTimerInterval);
+      sessionTimerInterval = null;
+      updateSessionUI();
+      updateTimer();
+      showToast(`Class ended (${Number(data.duration_minutes || 0).toFixed(1)} minutes)`);
+      await refreshAll();
+    } catch (err) {
+      showToast(`Could not end class: ${err.message}`, "error");
+    }
+  }
+
+  async function loadCurrentTimetable() {
+    const container = document.getElementById("currentClass");
+    try {
+      const data = await apiRequest("/api/timetable/current");
+      const cls = data.scheduled_class;
+      if (!cls) {
+        container.innerHTML = `<div><strong>No class scheduled right now</strong><span class="muted">Add a timetable entry for today's weekday and current time.</span></div>`;
+        return;
+      }
+      container.innerHTML = `
+        <div>
+          <strong>${escapeHtml(cls.subject)} — ${escapeHtml(cls.class_name)}</strong>
+          <span class="muted">${escapeHtml(cls.day)} · ${escapeHtml(cls.start_time)}–${escapeHtml(cls.end_time)} · Room ${escapeHtml(cls.room || "Not set")}${cls.instructor ? " · " + escapeHtml(cls.instructor) : ""}</span>
+        </div>
+        <button class="btn-start" onclick="startSelectedClass(${Number(cls.id)})" ${sessionActive ? "disabled" : ""}>Start This Class</button>`;
+    } catch (err) {
+      console.error(err);
+      container.innerHTML = `<div><strong>Could not load current timetable</strong><span class="muted">${escapeHtml(err.message)}</span></div>`;
+    }
+  }
+
+  async function loadAttendance() {
+    const table = document.getElementById("attendanceTable");
+    try {
+      const data = await apiRequest(sessionActive ? "/api/session/attendance" : "/api/students");
+      let students;
+      if (sessionActive) {
+        students = data.students || [];
+      } else {
+        // Outside a session, show registered students, not repeated detection rows.
+        students = Array.isArray(data) ? data.map(s => ({...s, presence_percentage: 0, status: "NOT IN SESSION"})) : [];
+      }
+
+      if (!students.length) {
+        table.innerHTML = `<tr><td colspan="5" class="empty">${sessionActive ? "No registered students yet." : "Register students to see them here."}</td></tr>`;
+        document.getElementById("connectedDevices").textContent = "0";
+        document.getElementById("presentStudents").textContent = "0";
+        return;
+      }
+
+      let presentCount = 0;
+      table.innerHTML = students.map(s => {
+        const percentage = Number(s.presence_percentage ?? 0);
+        const status = String(s.status || "NOT IN SESSION").toUpperCase();
+        if (status === "PRESENT") presentCount++;
+        const badge = status === "PRESENT" ? "badge-present" :
+          status === "LOW PRESENCE" ? "badge-low" : "badge-active";
+        return `<tr>
+          <td>${escapeHtml(s.student_id || "—")}</td>
+          <td>${escapeHtml(s.name || "—")}</td>
+          <td><code>${escapeHtml(s.device_mac || "—")}</code></td>
+          <td>${sessionActive ? percentage.toFixed(1) + "%" : "—"}</td>
+          <td><span class="badge ${badge}">${escapeHtml(status)}</span></td>
+        </tr>`;
+      }).join("");
+
+      document.getElementById("connectedDevices").textContent = String(students.length);
+      document.getElementById("presentStudents").textContent = String(presentCount);
+    } catch (err) {
+      console.error("Attendance error:", err);
+      table.innerHTML = `<tr><td colspan="5" class="empty">Could not load attendance: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  async function loadUnknownDevices() {
+    const container = document.getElementById("unknownDevices");
+    try {
+      const devices = await apiRequest("/api/unknown-devices");
+      if (!Array.isArray(devices) || !devices.length) {
+        container.innerHTML = `<div class="empty">No unknown devices detected.</div>`;
+        return;
+      }
+      container.innerHTML = devices.map(d => {
+        const mac = String(d.mac || d.device_mac || "");
+        return `<div class="unknown-item">
+          <div class="details">
+            <strong class="mono">${escapeHtml(mac)}</strong>
+            <span class="muted">Node: ${escapeHtml(d.node_id || "—")} · Last seen: ${escapeHtml(fmtDate(d.timestamp))}</span>
+          </div>
+          <button class="btn-orange" onclick="useUnknownDevice('${escapeHtml(mac)}')">Register This Device</button>
+        </div>`;
+      }).join("");
+    } catch (err) {
+      console.error(err);
+      container.innerHTML = `<div class="empty">Could not load unknown devices: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function useUnknownDevice(mac) {
+    document.getElementById("deviceMac").value = mac;
+    document.getElementById("studentId").focus();
+    document.getElementById("registrationForm").scrollIntoView({ behavior: "smooth", block: "center" });
+    showToast("MAC address added to registration form");
+  }
+
+  document.getElementById("registrationForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const student_id = document.getElementById("studentId").value.trim();
+    const name = document.getElementById("studentName").value.trim();
+    const device_mac = document.getElementById("deviceMac").value.trim().toUpperCase();
+    if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(device_mac)) {
+      showToast("Enter a valid MAC address, e.g. AA:BB:CC:DD:EE:FF", "error");
+      return;
+    }
+    try {
+      await apiRequest("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ student_id, name, device_mac })
+      });
+      event.target.reset();
+      showToast("Student registered successfully");
+      await loadAttendance();
+      await loadUnknownDevices();
+      await loadLiveDetection();
+    } catch (err) {
+      showToast(`Registration failed: ${err.message}`, "error");
+    }
+  });
+
+  document.getElementById("timetableForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    const start_time = document.getElementById("startTime").value;
+    const end_time = document.getElementById("endTime").value;
+    if (start_time >= end_time) {
+      showToast("End time must be later than start time", "error");
+      return;
+    }
+    const payload = {
+      class_name: document.getElementById("className").value.trim(),
+      subject: document.getElementById("subject").value.trim(),
+      instructor: document.getElementById("instructor").value.trim(),
+      room: document.getElementById("room").value.trim(),
+      day: document.getElementById("timetableDay").value,
+      start_time,
+      end_time
+    };
+    try {
+      await apiRequest("/api/timetable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      event.target.reset();
+      showToast("Timetable entry added");
+      await loadTimetable();
+      await loadCurrentTimetable();
+    } catch (err) {
+      showToast(`Could not add timetable: ${err.message}`, "error");
+    }
+  });
+
+  async function loadTimetable() {
+    const table = document.getElementById("timetableTable");
+    try {
+      timetableCache = await apiRequest("/api/timetable");
+      if (!Array.isArray(timetableCache) || !timetableCache.length) {
+        table.innerHTML = `<tr><td colspan="7" class="empty">No timetable entries yet. Add your first class above.</td></tr>`;
+        return;
+      }
+      table.innerHTML = timetableCache.map(item => `
+        <tr>
+          <td>${escapeHtml(item.day || "—")}</td>
+          <td>${escapeHtml(item.start_time)}–${escapeHtml(item.end_time)}</td>
+          <td>${escapeHtml(item.class_name)}</td>
+          <td>${escapeHtml(item.subject)}</td>
+          <td>${escapeHtml(item.instructor || "—")}</td>
+          <td>${escapeHtml(item.room || "—")}</td>
+          <td style="white-space:nowrap">
+            <button class="btn-start" onclick="startSelectedClass(${Number(item.id)})" ${sessionActive ? "disabled" : ""}>Start</button>
+            <button class="btn-danger" onclick="deleteTimetableEntry(${Number(item.id)})">Delete</button>
+          </td>
+        </tr>`).join("");
+    } catch (err) {
+      console.error(err);
+      table.innerHTML = `<tr><td colspan="7" class="empty">Could not load timetable: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  async function deleteTimetableEntry(id) {
+    if (!confirm("Delete this timetable entry?")) return;
+    try {
+      await apiRequest(`/api/timetable/${id}`, { method: "DELETE" });
+      showToast("Timetable entry deleted");
+      await loadTimetable();
+      await loadCurrentTimetable();
+    } catch (err) {
+      showToast(`Could not delete entry: ${err.message}`, "error");
+    }
+  }
+
+  async function loadLiveDetection() {
+    const table = document.getElementById("liveDetectionTable");
+    try {
+      const records = await apiRequest("/api/attendance");
+      if (!Array.isArray(records) || !records.length) {
+        table.innerHTML = `<tr><td colspan="6" class="empty">No detections recorded yet.</td></tr>`;
+        return;
+      }
+      table.innerHTML = records.slice(0, 30).map(r => `
+        <tr>
+          <td>${escapeHtml(r.student_id || "—")}</td>
+          <td>${escapeHtml(r.name || "—")}</td>
+          <td><code>${escapeHtml(r.device_mac || "—")}</code></td>
+          <td>${escapeHtml(r.node_id || "—")}</td>
+          <td><span class="badge ${String(r.status).toUpperCase() === "PRESENT" ? "badge-present" : "badge-low"}">${escapeHtml(r.status || "—")}</span></td>
+          <td>${escapeHtml(fmtDate(r.timestamp))}</td>
+        </tr>`).join("");
+    } catch (err) {
+      console.error(err);
+      table.innerHTML = `<tr><td colspan="6" class="empty">Could not load detection history.</td></tr>`;
+    }
+  }
+
+  async function checkBackend() {
+    const el = document.getElementById("nodeStatus");
+    try {
+      await apiRequest("/");
+      el.textContent = "ONLINE";
+      el.className = "metric-value green";
+    } catch {
+      el.textContent = "OFFLINE";
+      el.className = "metric-value red";
+    }
+  }
+
+  async function refreshAll() {
+    try {
+      await loadSessionStatus();
+    } catch (err) {
+      console.error("Session status error:", err);
+    }
+    await Promise.allSettled([
+      loadAttendance(),
+      loadUnknownDevices(),
+      loadLiveDetection(),
+      loadCurrentTimetable(),
+      loadTimetable(),
+      checkBackend()
+    ]);
+  }
+
+  window.addEventListener("load", async () => {
+    await refreshAll();
+    // Poll dashboard data every 5 seconds.
+    setInterval(refreshAll, 5000);
+  });
+</script>
+</body>
+</html>

@@ -1,62 +1,52 @@
-from fastapi import FastAPI
-import time
-from fastapi.middleware.cors import CORSMiddleware
-import sqlite3
 from datetime import datetime
-
-
-# =========================================================
-# APP
-# =========================================================
+import sqlite3
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Smart Classroom Attendance")
 
+DB_NAME = "attendance.db"
 
-# =========================================================
-# UNKNOWN DEVICES
-# =========================================================
-
+# Unknown devices are kept in memory. They will clear when FastAPI restarts.
 unknown_devices = {}
 
-
-# =========================================================
-# CORS
-# =========================================================
+DAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday",
+             "Friday", "Saturday", "Sunday"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # =========================================================
-# DATABASE
+# DATABASE HELPERS AND INITIALIZATION
 # =========================================================
-
-DB_NAME = "attendance.db"
-
 
 def get_db():
-    return sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-
-# =========================================================
-# INITIALIZE DATABASE
-# =========================================================
 
 def init_db():
-
+    """Create new tables and safely add timetable_id to old databases."""
     conn = get_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    # -----------------------------------------------------
-    # Registered students
-    # -----------------------------------------------------
-
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS students (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             student_id TEXT UNIQUE NOT NULL,
@@ -65,11 +55,7 @@ def init_db():
         )
     """)
 
-    # -----------------------------------------------------
-    # Attendance records
-    # -----------------------------------------------------
-
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             student_id TEXT NOT NULL,
@@ -80,11 +66,7 @@ def init_db():
         )
     """)
 
-    # -----------------------------------------------------
-    # Attendance sessions
-    # -----------------------------------------------------
-
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             start_time TEXT NOT NULL,
@@ -94,6 +76,42 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS timetable (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_name TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            instructor TEXT,
+            day_of_week INTEGER NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            room TEXT,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+
+    # Migrate an existing database without deleting its data.
+    session_columns = {
+        row["name"]
+        for row in cur.execute(
+            "PRAGMA table_info(attendance_sessions)"
+        ).fetchall()
+    }
+    if "timetable_id" not in session_columns:
+        cur.execute("""
+            ALTER TABLE attendance_sessions
+            ADD COLUMN timetable_id INTEGER
+        """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attendance_student_timestamp
+        ON attendance(student_id, timestamp)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_timetable_day_time
+        ON timetable(day_of_week, start_time, end_time, active)
+    """)
+
     conn.commit()
     conn.close()
 
@@ -101,647 +119,778 @@ def init_db():
 init_db()
 
 
+def normalize_mac(value):
+    return value.strip().upper() if isinstance(value, str) else ""
+
+
+def timetable_dict(row):
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "class_name": row["class_name"],
+        "subject": row["subject"],
+        "instructor": row["instructor"],
+        "day_of_week": row["day_of_week"],
+        "day": DAY_NAMES[row["day_of_week"]],
+        "start_time": row["start_time"],
+        "end_time": row["end_time"],
+        "room": row["room"],
+        "active": bool(row["active"]),
+    }
+
+
+def find_current_timetable(cursor, now):
+    """Find the first active timetable entry covering the current local time."""
+    day_number = now.weekday()
+    current_time = now.strftime("%H:%M")
+    return cursor.execute("""
+        SELECT *
+        FROM timetable
+        WHERE active = 1
+          AND day_of_week = ?
+          AND start_time <= ?
+          AND end_time > ?
+        ORDER BY start_time, id
+        LIMIT 1
+    """, (day_number, current_time, current_time)).fetchone()
+
+
 # =========================================================
-# ROOT
+# ROOT / HEALTH
 # =========================================================
 
 @app.get("/")
 def root():
-
     return {
         "status": "online",
-        "project": "Smart Classroom Attendance"
+        "project": "Smart Classroom Attendance",
     }
 
 
 # =========================================================
-# REGISTER STUDENT
+# REGISTERED STUDENTS
 # =========================================================
 
 @app.post("/api/register")
 def register_student(data: dict):
-
-    student_id = data.get("student_id")
-    name = data.get("name")
-    device_mac = data.get("device_mac")
+    student_id = str(data.get("student_id", "")).strip()
+    name = str(data.get("name", "")).strip()
+    device_mac = normalize_mac(data.get("device_mac"))
 
     if not student_id or not name or not device_mac:
-
-        return {
-            "status": "error",
-            "message": "student_id, name and device_mac are required"
-        }
-
-    # Normalize MAC address
-    device_mac = device_mac.strip().upper()
+        raise HTTPException(
+            status_code=400,
+            detail="student_id, name and device_mac are required",
+        )
 
     conn = get_db()
-    cursor = conn.cursor()
-
     try:
-
-        cursor.execute("""
-            INSERT INTO students
-            (student_id, name, device_mac)
+        conn.execute("""
+            INSERT INTO students (student_id, name, device_mac)
             VALUES (?, ?, ?)
-        """, (
-            student_id,
-            name,
-            device_mac
-        ))
-
+        """, (student_id, name, device_mac))
         conn.commit()
-
     except sqlite3.IntegrityError:
-
+        raise HTTPException(
+            status_code=409,
+            detail="Student ID or device MAC is already registered",
+        )
+    finally:
         conn.close()
 
-        return {
-            "status": "error",
-            "message": "Student ID or device MAC already registered"
-        }
-
-    conn.close()
-
-
-    # =====================================================
-    # IMPORTANT FIX
-    #
-    # Remove the device from the unknown-device list
-    # immediately after successful registration.
-    # =====================================================
-
+    # Remove the MAC from the unknown list after successful registration.
     unknown_devices.pop(device_mac, None)
 
-
-    print("\n================================")
-    print("       STUDENT REGISTERED")
-    print("================================")
-    print("Student ID :", student_id)
-    print("Name       :", name)
-    print("Device MAC :", device_mac)
-    print("================================")
-
-
+    print(
+        f"[REGISTERED] {student_id} | {name} | {device_mac}"
+    )
     return {
         "status": "registered",
         "student_id": student_id,
         "name": name,
-        "device_mac": device_mac
+        "device_mac": device_mac,
+    }
+
+
+@app.get("/api/students")
+def get_students():
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT student_id, name, device_mac
+        FROM students
+        ORDER BY student_id
+    """).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+# =========================================================
+# TIMETABLE MANAGEMENT
+# =========================================================
+
+@app.post("/api/timetable")
+def add_timetable_entry(data: dict):
+    class_name = str(data.get("class_name", "")).strip()
+    subject = str(data.get("subject", "")).strip()
+    instructor = str(data.get("instructor", "")).strip() or None
+    room = str(data.get("room", "")).strip() or None
+    start_time = str(data.get("start_time", "")).strip()
+    end_time = str(data.get("end_time", "")).strip()
+
+    day_value = data.get("day_of_week", data.get("day"))
+    if isinstance(day_value, str):
+        day_value = DAYS.get(day_value.strip().lower(), day_value)
+
+    try:
+        day_value = int(day_value)
+        if day_value not in range(7):
+            raise ValueError("weekday out of range")
+        datetime.strptime(start_time, "%H:%M")
+        datetime.strptime(end_time, "%H:%M")
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Provide day/day_of_week as a weekday name or 0-6 "
+                "(Monday=0), and times in HH:MM format."
+            ),
+        )
+
+    if not class_name or not subject:
+        raise HTTPException(
+            status_code=400,
+            detail="class_name and subject are required",
+        )
+    if start_time >= end_time:
+        raise HTTPException(
+            status_code=400,
+            detail="end_time must be later than start_time",
+        )
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO timetable
+        (class_name, subject, instructor, day_of_week,
+         start_time, end_time, room, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    """, (
+        class_name, subject, instructor, day_value,
+        start_time, end_time, room,
+    ))
+    conn.commit()
+
+    entry_id = cur.lastrowid
+    row = cur.execute(
+        "SELECT * FROM timetable WHERE id = ?", (entry_id,)
+    ).fetchone()
+    conn.close()
+
+    return {
+        "status": "created",
+        "timetable": timetable_dict(row),
+    }
+
+
+@app.get("/api/timetable")
+def get_timetable(day: str | None = None):
+    conn = get_db()
+
+    if day is not None:
+        day_number = DAYS.get(day.strip().lower())
+        if day_number is None:
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail="day must be Monday through Sunday",
+            )
+        rows = conn.execute("""
+            SELECT * FROM timetable
+            WHERE day_of_week = ?
+            ORDER BY start_time, id
+        """, (day_number,)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT * FROM timetable
+            ORDER BY day_of_week, start_time, id
+        """).fetchall()
+
+    conn.close()
+    return [timetable_dict(row) for row in rows]
+
+
+@app.delete("/api/timetable/{entry_id}")
+def delete_timetable_entry(entry_id: int):
+    conn = get_db()
+    cursor = conn.execute(
+        "DELETE FROM timetable WHERE id = ?", (entry_id,)
+    )
+    conn.commit()
+    deleted = cursor.rowcount
+    conn.close()
+
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Timetable entry not found",
+        )
+    return {"status": "deleted", "id": entry_id}
+
+
+@app.get("/api/timetable/current")
+def get_current_timetable():
+    now = datetime.now()
+    conn = get_db()
+    row = find_current_timetable(conn.cursor(), now)
+    conn.close()
+
+    return {
+        "scheduled_class": timetable_dict(row),
+        "checked_at": now.isoformat(),
     }
 
 
 # =========================================================
-# ESP32 NODE DETECTION
+# ESP32 DEVICE DETECTION
 # =========================================================
 
 @app.post("/api/node")
 def receive_node(data: dict):
-
-    node_id = data.get("node_id")
-    device_mac = data.get("device_mac")
-
+    node_id = str(data.get("node_id", "UNKNOWN_NODE")).strip()
+    device_mac = normalize_mac(data.get("device_mac"))
     timestamp = datetime.now().isoformat()
 
-
     if not device_mac:
-
-        return {
-            "status": "error",
-            "message": "No device MAC received"
-        }
-
-
-    # Normalize MAC
-    device_mac = device_mac.strip().upper()
-
+        raise HTTPException(
+            status_code=400,
+            detail="No device MAC received",
+        )
 
     conn = get_db()
-    cursor = conn.cursor()
-
-
-    # =====================================================
-    # FIND STUDENT USING MAC
-    # =====================================================
-
-    cursor.execute("""
+    student = conn.execute("""
         SELECT student_id, name
         FROM students
         WHERE device_mac = ?
-    """, (device_mac,))
+    """, (device_mac,)).fetchone()
 
-
-    student = cursor.fetchone()
-
-
-    # =====================================================
-    # REGISTERED STUDENT
-    # =====================================================
-
-    if student:
-
-        student_id = student[0]
-        name = student[1]
-
-
-        # -------------------------------------------------
-        # IMPORTANT FIX
-        #
-        # If this MAC was previously unknown but is now
-        # registered, remove it from unknown_devices.
-        # -------------------------------------------------
-
-        unknown_devices.pop(device_mac, None)
-
-
-        # -------------------------------------------------
-        # Record attendance
-        # -------------------------------------------------
-
-        cursor.execute("""
-            INSERT INTO attendance
-            (student_id, node_id, device_mac, timestamp, status)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            student_id,
-            node_id,
-            device_mac,
-            timestamp,
-            "PRESENT"
-        ))
-
-
-        conn.commit()
+    if student is None:
         conn.close()
-
-
-        print("\n================================")
-        print("       STUDENT PRESENT")
-        print("================================")
-        print("Student ID :", student_id)
-        print("Name       :", name)
-        print("Device MAC :", device_mac)
-        print("Node       :", node_id)
-        print("Time       :", timestamp)
-        print("Status     : PRESENT")
-        print("================================")
-
-
-        return {
-            "status": "present",
-            "student_id": student_id,
-            "name": name,
-            "node_id": node_id,
-            "timestamp": timestamp
-        }
-
-
-    # =====================================================
-    # UNKNOWN DEVICE
-    # =====================================================
-
-    else:
-
-        conn.close()
-
-
-        # -------------------------------------------------
-        # Store/update unknown device
-        # -------------------------------------------------
-
         unknown_devices[device_mac] = {
             "mac": device_mac,
             "node_id": node_id,
-            "timestamp": timestamp
+            "timestamp": timestamp,
         }
-
-
-        print("\n================================")
-        print("       UNKNOWN DEVICE")
-        print("================================")
-        print("MAC :", device_mac)
-        print("Node:", node_id)
-        print("Time:", timestamp)
-        print("================================")
-
-
         return {
             "status": "unknown_device",
             "device_mac": device_mac,
             "node_id": node_id,
-            "timestamp": timestamp
+            "timestamp": timestamp,
         }
 
+    # If the MAC is registered, clear any stale unknown-device entry.
+    unknown_devices.pop(device_mac, None)
 
-# =========================================================
-# UNKNOWN DEVICES
-# =========================================================
+    conn.execute("""
+        INSERT INTO attendance
+        (student_id, node_id, device_mac, timestamp, status)
+        VALUES (?, ?, ?, ?, 'PRESENT')
+    """, (
+        student["student_id"],
+        node_id,
+        device_mac,
+        timestamp,
+    ))
+    conn.commit()
+    conn.close()
+
+    print(
+        f"[PRESENT] Student ID: {student['student_id']} | "
+        f"Name: {student['name']} | MAC: {device_mac} | "
+        f"Node: {node_id} | Time: {timestamp}"
+    )
+
+    return {
+        "status": "present",
+        "student_id": student["student_id"],
+        "name": student["name"],
+        "node_id": node_id,
+        "timestamp": timestamp,
+    }
+
 
 @app.get("/api/unknown-devices")
 def get_unknown_devices():
+    # Also filter out MACs that may have been registered since first detection.
+    conn = get_db()
+    registered_rows = conn.execute(
+        "SELECT device_mac FROM students"
+    ).fetchall()
+    conn.close()
+    registered_macs = {normalize_mac(row["device_mac"]) for row in registered_rows}
+
+    for mac in list(unknown_devices.keys()):
+        if normalize_mac(mac) in registered_macs:
+            unknown_devices.pop(mac, None)
 
     return list(unknown_devices.values())
 
 
 # =========================================================
-# VIEW REGISTERED STUDENTS
-# =========================================================
-
-@app.get("/api/students")
-def get_students():
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-
-    cursor.execute("""
-        SELECT student_id, name, device_mac
-        FROM students
-    """)
-
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-
-    return [
-        {
-            "student_id": row[0],
-            "name": row[1],
-            "device_mac": row[2]
-        }
-        for row in rows
-    ]
-
-
-# =========================================================
-# VIEW ATTENDANCE
+# ATTENDANCE HISTORY
 # =========================================================
 
 @app.get("/api/attendance")
 def get_attendance():
-
     conn = get_db()
-    cursor = conn.cursor()
-
-
-    cursor.execute("""
+    rows = conn.execute("""
         SELECT
-            student_id,
-            node_id,
-            device_mac,
-            timestamp,
-            status
-        FROM attendance
-        ORDER BY id DESC
-    """)
-
-
-    rows = cursor.fetchall()
-
+            a.student_id,
+            COALESCE(s.name, '') AS name,
+            a.node_id,
+            a.device_mac,
+            a.timestamp,
+            a.status
+        FROM attendance AS a
+        LEFT JOIN students AS s
+          ON s.student_id = a.student_id
+        ORDER BY a.id DESC
+    """).fetchall()
     conn.close()
-
-
-    return [
-        {
-            "student_id": row[0],
-            "node_id": row[1],
-            "device_mac": row[2],
-            "timestamp": row[3],
-            "status": row[4]
-        }
-        for row in rows
-    ]
+    return [dict(row) for row in rows]
 
 
 # =========================================================
-# START ATTENDANCE SESSION
+# ATTENDANCE SESSION START
 # =========================================================
 
 @app.post("/api/session/start")
-def start_session():
-
+def start_session(data: dict | None = None):
+    data = data or {}
+    now = datetime.now()
     conn = get_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-
-    # Check if a session is already active
-
-    cursor.execute("""
-        SELECT id, start_time
+    existing = cur.execute("""
+        SELECT id, start_time, timetable_id
         FROM attendance_sessions
         WHERE status = 'ACTIVE'
         ORDER BY id DESC
         LIMIT 1
-    """)
-
-
-    existing = cursor.fetchone()
-
+    """).fetchone()
 
     if existing:
-
+        scheduled = None
+        if existing["timetable_id"] is not None:
+            scheduled = cur.execute(
+                "SELECT * FROM timetable WHERE id = ?",
+                (existing["timetable_id"],),
+            ).fetchone()
         conn.close()
-
         return {
             "status": "already_active",
-            "session_id": existing[0],
-            "start_time": existing[1]
+            "session_id": existing["id"],
+            "start_time": existing["start_time"],
+            "timetable_id": existing["timetable_id"],
+            "scheduled_class": timetable_dict(scheduled),
         }
 
+    # Caller may explicitly choose a timetable entry.
+    timetable_id = data.get("timetable_id")
+    scheduled = None
 
-    start_time = datetime.now().isoformat()
+    if timetable_id is not None:
+        scheduled = cur.execute("""
+            SELECT * FROM timetable
+            WHERE id = ? AND active = 1
+        """, (timetable_id,)).fetchone()
 
+        if scheduled is None:
+            conn.close()
+            raise HTTPException(
+                status_code=404,
+                detail="Active timetable entry not found",
+            )
+    else:
+        # Otherwise automatically match today's day and current local time.
+        scheduled = find_current_timetable(cur, now)
+        if scheduled is not None:
+            timetable_id = scheduled["id"]
 
-    cursor.execute("""
+    start_time = now.isoformat()
+    cur.execute("""
         INSERT INTO attendance_sessions
-        (start_time, status)
-        VALUES (?, ?)
-    """, (
-        start_time,
-        "ACTIVE"
-    ))
+        (start_time, status, timetable_id)
+        VALUES (?, 'ACTIVE', ?)
+    """, (start_time, timetable_id))
 
-
-    session_id = cursor.lastrowid
-
-
+    session_id = cur.lastrowid
     conn.commit()
     conn.close()
-
 
     return {
         "status": "started",
         "session_id": session_id,
-        "start_time": start_time
+        "start_time": start_time,
+        "timetable_id": timetable_id,
+        "scheduled_class": timetable_dict(scheduled),
+        "schedule_match": scheduled is not None,
     }
 
 
 # =========================================================
-# END ATTENDANCE SESSION
+# ATTENDANCE SESSION END
 # =========================================================
 
 @app.post("/api/session/end")
 def end_session():
-
     conn = get_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-
-    cursor.execute("""
+    session = cur.execute("""
         SELECT id, start_time
         FROM attendance_sessions
         WHERE status = 'ACTIVE'
         ORDER BY id DESC
         LIMIT 1
-    """)
+    """).fetchone()
 
-
-    session = cursor.fetchone()
-
-
-    if not session:
-
+    if session is None:
         conn.close()
-
-        return {
-            "status": "error",
-            "message": "No active session"
-        }
-
-
-    session_id = session[0]
-    start_time = datetime.fromisoformat(session[1])
-
+        raise HTTPException(
+            status_code=400,
+            detail="No active session",
+        )
 
     end_time = datetime.now()
-
-
-    duration_seconds = (
+    start_time = datetime.fromisoformat(session["start_time"])
+    duration_minutes = (
         end_time - start_time
-    ).total_seconds()
+    ).total_seconds() / 60
 
-
-    duration_minutes = duration_seconds / 60
-
-
-    cursor.execute("""
+    cur.execute("""
         UPDATE attendance_sessions
-        SET
-            end_time = ?,
+        SET end_time = ?,
             duration_minutes = ?,
             status = 'COMPLETED'
         WHERE id = ?
     """, (
         end_time.isoformat(),
         duration_minutes,
-        session_id
+        session["id"],
     ))
-
 
     conn.commit()
     conn.close()
 
-
     return {
         "status": "completed",
-        "session_id": session_id,
+        "session_id": session["id"],
         "start_time": start_time.isoformat(),
         "end_time": end_time.isoformat(),
-        "duration_minutes": round(
-            duration_minutes,
-            2
-        )
+        "duration_minutes": round(duration_minutes, 2),
     }
 
 
 # =========================================================
-# CURRENT SESSION
+# CURRENT SESSION STATUS
 # =========================================================
 
 @app.get("/api/session/current")
 def current_session():
-
     conn = get_db()
-    cursor = conn.cursor()
-
-
-    cursor.execute("""
+    row = conn.execute("""
         SELECT
-            id,
-            start_time,
-            end_time,
-            duration_minutes,
-            status
-        FROM attendance_sessions
-        WHERE status = 'ACTIVE'
-        ORDER BY id DESC
+            ses.id,
+            ses.start_time,
+            ses.end_time,
+            ses.duration_minutes,
+            ses.status,
+            ses.timetable_id,
+            t.class_name,
+            t.subject,
+            t.instructor,
+            t.day_of_week,
+            t.start_time AS class_start_time,
+            t.end_time AS class_end_time,
+            t.room,
+            t.active AS timetable_active
+        FROM attendance_sessions AS ses
+        LEFT JOIN timetable AS t
+          ON t.id = ses.timetable_id
+        WHERE ses.status = 'ACTIVE'
+        ORDER BY ses.id DESC
         LIMIT 1
-    """)
-
-
-    session = cursor.fetchone()
-
-
+    """).fetchone()
     conn.close()
 
+    if row is None:
+        return {"active": False}
 
-    if not session:
-
-        return {
-            "active": False
+    scheduled_class = None
+    if row["timetable_id"] is not None and row["class_name"] is not None:
+        scheduled_class = {
+            "id": row["timetable_id"],
+            "class_name": row["class_name"],
+            "subject": row["subject"],
+            "instructor": row["instructor"],
+            "day_of_week": row["day_of_week"],
+            "day": DAY_NAMES[row["day_of_week"]],
+            "start_time": row["class_start_time"],
+            "end_time": row["class_end_time"],
+            "room": row["room"],
+            "active": bool(row["timetable_active"]),
         }
-
 
     return {
         "active": True,
-        "session_id": session[0],
-        "start_time": session[1],
-        "end_time": session[2],
-        "duration_minutes": session[3],
-        "status": session[4]
+        "session_id": row["id"],
+        "start_time": row["start_time"],
+        "end_time": row["end_time"],
+        "duration_minutes": row["duration_minutes"],
+        "status": row["status"],
+        "timetable_id": row["timetable_id"],
+        "scheduled_class": scheduled_class,
     }
 
 
 # =========================================================
-# SESSION ATTENDANCE
+# ACTIVE SESSION ATTENDANCE
 # =========================================================
 
 @app.get("/api/session/attendance")
 def session_attendance():
-
     conn = get_db()
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-
-    # Find active session
-
-    cursor.execute("""
-        SELECT id, start_time
+    session = cur.execute("""
+        SELECT id, start_time, timetable_id
         FROM attendance_sessions
         WHERE status = 'ACTIVE'
         ORDER BY id DESC
         LIMIT 1
-    """)
+    """).fetchone()
 
-
-    session = cursor.fetchone()
-
-
-    if not session:
-
+    if session is None:
         conn.close()
+        return {"active": False, "students": []}
 
-        return {
-            "active": False,
-            "students": []
-        }
+    start_time_text = session["start_time"]
+    start_time = datetime.fromisoformat(start_time_text)
+    elapsed_seconds = max(
+        (datetime.now() - start_time).total_seconds(), 0
+    )
 
-
-    session_id = session[0]
-    start_time = datetime.fromisoformat(session[1])
-
-
-    now = datetime.now()
-
-
-    elapsed_seconds = (
-        now - start_time
-    ).total_seconds()
-
-
-    # Get registered students
-
-    cursor.execute("""
+    students = cur.execute("""
         SELECT student_id, name, device_mac
         FROM students
-    """)
-
-
-    students = cursor.fetchall()
-
+        ORDER BY student_id
+    """).fetchall()
 
     results = []
 
-
     for student in students:
-
-        student_id = student[0]
-        name = student[1]
-        device_mac = student[2]
-
-
-        # Count detections since session began
-
-        cursor.execute("""
-            SELECT COUNT(*)
-            FROM attendance
-            WHERE student_id = ?
-            AND timestamp >= ?
+        # Count unique five-second buckets. If both ESP32 nodes see the
+        # same student within a bucket, that bucket is counted once.
+        detection_row = cur.execute("""
+            SELECT COUNT(*) AS bucket_count
+            FROM (
+                SELECT CAST(
+                    (julianday(timestamp) - julianday(?)) * 86400 / 5
+                    AS INTEGER
+                ) AS bucket
+                FROM attendance
+                WHERE student_id = ?
+                  AND timestamp >= ?
+                GROUP BY bucket
+            )
         """, (
-            student_id,
-            start_time.isoformat()
-        ))
+            start_time_text,
+            student["student_id"],
+            start_time_text,
+        )).fetchone()
 
-
-        detection_count = cursor.fetchone()[0]
-
-
-        # ESP32 sends approximately every 5 seconds
-
-        detected_seconds = detection_count * 5
-
+        detections = detection_row["bucket_count"] or 0
+        detected_seconds = min(detections * 5, elapsed_seconds)
 
         if elapsed_seconds > 0:
-
-            percentage = (
-                detected_seconds /
-                elapsed_seconds
-            ) * 100
-
+            percentage = detected_seconds / elapsed_seconds * 100
         else:
-
             percentage = 0
 
-
-        percentage = min(
-            percentage,
-            100
-        )
-
-
-        if percentage >= 60:
-
-            status = "PRESENT"
-
-        else:
-
-            status = "LOW PRESENCE"
-
+        percentage = min(percentage, 100)
+        status = "PRESENT" if percentage >= 60 else "LOW PRESENCE"
 
         results.append({
-            "student_id": student_id,
-            "name": name,
-            "device_mac": device_mac,
-            "detections": detection_count,
-            "presence_percentage": round(
-                percentage,
-                1
-            ),
-            "status": status
+            "student_id": student["student_id"],
+            "name": student["name"],
+            "device_mac": student["device_mac"],
+            "detections": detections,
+            "presence_percentage": round(percentage, 1),
+            "status": status,
         })
 
+    scheduled = None
+    if session["timetable_id"] is not None:
+        scheduled = cur.execute(
+            "SELECT * FROM timetable WHERE id = ?",
+            (session["timetable_id"],),
+        ).fetchone()
 
     conn.close()
 
-
     return {
         "active": True,
-        "session_id": session_id,
-        "elapsed_minutes": round(
-            elapsed_seconds / 60,
-            2
-        ),
-        "students": results
+        "session_id": session["id"],
+        "timetable_id": session["timetable_id"],
+        "scheduled_class": timetable_dict(scheduled),
+        "elapsed_minutes": round(elapsed_seconds / 60, 2),
+        "students": results,
+    }
+
+
+# =========================================================
+# COMPLETED OR HISTORICAL SESSION ATTENDANCE
+# =========================================================
+
+@app.get("/api/session/{session_id}/attendance")
+def get_session_attendance_history(session_id: int):
+    conn = get_db()
+    session = conn.execute("""
+        SELECT id, start_time, end_time, status, timetable_id
+        FROM attendance_sessions
+        WHERE id = ?
+    """, (session_id,)).fetchone()
+
+    if session is None:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found",
+        )
+
+    end_time = session["end_time"] or datetime.now().isoformat()
+
+    rows = conn.execute("""
+        SELECT
+            a.student_id,
+            s.name,
+            a.device_mac,
+            a.node_id,
+            MIN(a.timestamp) AS first_seen,
+            MAX(a.timestamp) AS last_seen,
+            COUNT(*) AS detection_count
+        FROM attendance AS a
+        JOIN students AS s
+          ON s.student_id = a.student_id
+        WHERE a.timestamp >= ?
+          AND a.timestamp <= ?
+        GROUP BY a.student_id, s.name, a.device_mac, a.node_id
+        ORDER BY s.name
+    """, (session["start_time"], end_time)).fetchall()
+
+    conn.close()
+
+    return {
+        "session_id": session["id"],
+        "status": session["status"],
+        "timetable_id": session["timetable_id"],
+        "students": [dict(row) for row in rows],
+    }
+
+
+# =========================================================
+# SUBJECT-WISE ATTENDANCE SUMMARY
+# =========================================================
+
+@app.get("/api/attendance/subject-summary")
+def subject_attendance_summary():
+    """Return attendance percentages by subject across completed sessions.
+
+    A completed session counts as attended when the student's estimated
+    detection coverage for that session reaches the existing 60% threshold.
+    Only sessions linked to a timetable subject are included.
+    """
+    conn = get_db()
+    students = conn.execute("""
+        SELECT student_id, name
+        FROM students
+        ORDER BY name COLLATE NOCASE, student_id
+    """).fetchall()
+
+    sessions = conn.execute("""
+        SELECT ses.id, ses.start_time, ses.end_time, ses.timetable_id,
+               t.subject, t.class_name
+        FROM attendance_sessions AS ses
+        JOIN timetable AS t ON t.id = ses.timetable_id
+        WHERE ses.status = 'COMPLETED'
+          AND ses.end_time IS NOT NULL
+          AND t.subject IS NOT NULL
+          AND TRIM(t.subject) <> ''
+        ORDER BY ses.start_time
+    """).fetchall()
+
+    # Each subject's denominator is the number of completed, scheduled
+    # sessions for that subject, not the number of timetable entries.
+    subject_sessions = {}
+    session_student_presence = {}
+
+    for session in sessions:
+        subject = session["subject"].strip()
+        subject_sessions[subject] = subject_sessions.get(subject, 0) + 1
+        start_text = session["start_time"]
+        end_text = session["end_time"]
+        start_dt = datetime.fromisoformat(start_text)
+        end_dt = datetime.fromisoformat(end_text)
+        elapsed_seconds = max((end_dt - start_dt).total_seconds(), 0)
+
+        rows = conn.execute("""
+            SELECT student_id, timestamp
+            FROM attendance
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp
+        """, (start_text, end_text)).fetchall()
+
+        buckets_by_student = {}
+        for row in rows:
+            try:
+                detected_at = datetime.fromisoformat(row["timestamp"])
+            except (TypeError, ValueError):
+                continue
+            bucket = int((detected_at - start_dt).total_seconds() // 5)
+            if bucket >= 0:
+                buckets_by_student.setdefault(row["student_id"], set()).add(bucket)
+
+        for student in students:
+            buckets = buckets_by_student.get(student["student_id"], set())
+            estimated_seconds = min(len(buckets) * 5, elapsed_seconds)
+            coverage = (estimated_seconds / elapsed_seconds * 100) if elapsed_seconds > 0 else 0
+            session_student_presence[(session["id"], student["student_id"])] = coverage >= 60
+
+    results = []
+    for student in students:
+        subject_data = {}
+        for subject, total_sessions in subject_sessions.items():
+            subject_session_rows = [s for s in sessions if s["subject"].strip() == subject]
+            attended = sum(
+                1 for session in subject_session_rows
+                if session_student_presence.get((session["id"], student["student_id"]), False)
+            )
+            subject_data[subject] = {
+                "attended": attended,
+                "total": total_sessions,
+                "percentage": round(attended / total_sessions * 100, 1) if total_sessions else 0.0,
+            }
+        results.append({
+            "student_id": student["student_id"],
+            "name": student["name"],
+            "subjects": subject_data,
+        })
+
+    conn.close()
+    return {
+        "threshold_percentage": 60,
+        "completed_sessions": len(sessions),
+        "subjects": sorted(subject_sessions.keys(), key=str.casefold),
+        "students": results,
     }
